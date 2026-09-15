@@ -20,8 +20,7 @@ from utils.data_loader import load_listings
 
 load_dotenv()
 
-MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"
-
+MODEL_NAME = "qwen/qwen3.8-27b"
 
 # ── Groq client ───────────────────────────────────────────────────────────────
 
@@ -40,38 +39,33 @@ def search_listings(
     size: str | None = None,
     max_price: float | None = None,
 ) -> list[dict]:
-    """
-    Search the mock listings dataset for items matching the description,
-    optional size, and optional price ceiling.
-    """
-    # 1. Load all listings
     listings = load_listings()
-    
-    # Clean and tokenize query description
+    if not listings:
+        return []
+
     query_tokens = set(re.findall(r'\b\w+\b', description.lower())) if description else set()
-    
     scored_listings = []
 
     for item in listings:
-        # 2. Filter by max_price (inclusive)
-        if max_price is not None and float(item.get("price", 0)) > float(max_price):
-            continue
+        if max_price is not None:
+            try:
+                if float(item.get("price", 0)) > float(max_price):
+                    continue
+            except (ValueError, TypeError):
+                continue
 
-        # Filter by size (case-insensitive substring match, e.g., "M" in "S/M")
         if size:
             item_size = (item.get("size") or "").upper()
             target_size = size.upper()
             if target_size not in item_size:
                 continue
 
-        # Safely extract string fields
         title = (item.get("title") or "").lower()
         desc = (item.get("description") or "").lower()
         category = (item.get("category") or "").lower()
         tags = [t.lower() for t in (item.get("style_tags") or []) if t]
         brand = (item.get("brand") or "").lower()
 
-        # Tokenize fields
         title_tokens = set(re.findall(r'\b\w+\b', title))
         desc_tokens = set(re.findall(r'\b\w+\b', desc))
         category_tokens = set(re.findall(r'\b\w+\b', category))
@@ -80,23 +74,22 @@ def search_listings(
 
         score = 0
         for token in query_tokens:
-            if token in title_tokens:
+            if token in title_tokens or token in category_tokens:
                 score += 3
-            if token in category_tokens:
-                score += 3
-            if token in tag_tokens:
-                score += 2
-            if token in brand_tokens:
+            if token in tag_tokens or token in brand_tokens:
                 score += 2
             if token in desc_tokens:
                 score += 1
 
-        if score > 0:
+        # If description is empty or score > 0, include item
+        if score > 0 or not query_tokens:
             scored_listings.append((score, item))
+
+    if not scored_listings:
+        return []
 
     scored_listings.sort(key=lambda x: x[0], reverse=True)
     return [item for _, item in scored_listings]
-
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
 
@@ -116,16 +109,23 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     if not items_list:
         prompt = (
-            f"The user has acquired a thrift item: {title} ({category}, style tags: {style_tags}). "
-            f"The user's wardrobe is empty. Suggest 2-3 versatile ways to style this piece "
-            f"as a standalone statement item using general fashion guidelines."
+            f"Thrift item: {title} ({category}, style tags: {style_tags}).\n"
+            f"The user's wardrobe is empty.\n"
+            f"Suggest 2-3 versatile ways to style this piece as a standalone statement item using staple basics."
         )
     else:
-        wardrobe_str = json.dumps(items_list, indent=2)
+        # Create a lightweight text summary of wardrobe titles/categories instead of heavy formatted JSON
+        wardrobe_summaries = []
+        for w in items_list[:10]: # Cap at top 10 items to prevent oversized requests
+            w_title = w.get("title") or w.get("name") or "Item"
+            w_cat = w.get("category", "")
+            wardrobe_summaries.append(f"- {w_title} ({w_cat})")
+        
+        wardrobe_text = "\n".join(wardrobe_summaries)
         prompt = (
-            f"New thrift item: {title} ({category}, style tags: {style_tags}).\n"
-            f"User's current wardrobe:\n{wardrobe_str}\n\n"
-            f"Suggest a cohesive, stylish outfit ensemble combining the new item with 2-3 items from the wardrobe."
+            f"New item: {title} ({category}, tags: {style_tags}).\n"
+            f"User wardrobe items:\n{wardrobe_text}\n\n"
+            f"Suggest a cohesive outfit ensemble combining the new item with 2-3 pieces from the wardrobe."
         )
 
     try:
@@ -133,13 +133,14 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
-                {"role": "system", "content": "You are an expert personal fashion stylist."},
+                {"role": "system", "content": "You are a concise fashion stylist."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
-            max_tokens=350,
+            max_tokens=300,
         )
-        content = response.choices[0].message.content
+        message = response.choices[0].message
+        content = getattr(message, "content", None) or getattr(message, "reasoning_content", None)
         return content.strip() if content else "Styling recommendation generation was empty."
     except Exception as e:
         return f"Styling unavailable: {str(e)}"
@@ -167,16 +168,16 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
     except (ValueError, TypeError):
         price_str = str(price)
 
+    # Truncate outfit text context if exceptionally long
+    clean_outfit = outfit[:400]
+
     prompt = (
-        f"Write a short, casual, authentic 2-4 sentence Instagram/TikTok OOTD caption.\n\n"
-        f"Outfit Context: {outfit}\n"
+        f"Write a short, casual 2-3 sentence social media caption for this fit.\n\n"
+        f"Outfit Context: {clean_outfit}\n"
         f"Thrifted Item: {title}\n"
-        f"Price Paid: {price_str}\n"
-        f"Platform Sourced From: {platform}\n\n"
-        f"Style Requirements:\n"
-        f"- Sound authentic and casual (like a real OOTD post).\n"
-        f"- Naturally mention the item title ({title}), price ({price_str}), and platform ({platform}) exactly once each.\n"
-        f"- Keep it strictly between 2 to 4 sentences."
+        f"Price: {price_str}\n"
+        f"Platform: {platform}\n\n"
+        f"Include the item title, price ({price_str}), and platform naturally."
     )
 
     try:
@@ -184,10 +185,11 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
-                {"role": "system", "content": "You are a trendy social media fashion influencer."},
-                {"role": "user", "content": prompt}],
-            temperature=0.8,
-            max_tokens=350,
+                {"role": "system", "content": "You are a trendy fashion social media writer."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=250,
         )
         message = response.choices[0].message
         content = getattr(message, "content", None) or getattr(message, "reasoning_content", None)
