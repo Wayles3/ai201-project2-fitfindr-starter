@@ -4,33 +4,32 @@ tools.py
 The three required FitFindr tools. Each tool is a standalone function that
 can be called and tested independently before being wired into the agent loop.
 
-Complete and test each tool before moving to agent.py.
-
 Tools:
     search_listings(description, size, max_price)  → list[dict]
     suggest_outfit(new_item, wardrobe)              → str
     create_fit_card(outfit, new_item)               → str
 """
-
+from __future__ import annotations
+import re
 import os
-
+import json
 from dotenv import load_dotenv
 from groq import Groq
-
 from utils.data_loader import load_listings
 
+
 load_dotenv()
+
+MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 
 # ── Groq client ───────────────────────────────────────────────────────────────
 
-def _get_groq_client():
+def _get_groq_client() -> Groq:
     """Initialize and return a Groq client using GROQ_API_KEY from .env."""
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
-        raise ValueError(
-            "GROQ_API_KEY not set. Add it to a .env file in the project root."
-        )
+        raise ValueError("GROQ_API_KEY environment variable is missing.")
     return Groq(api_key=api_key)
 
 
@@ -44,94 +43,156 @@ def search_listings(
     """
     Search the mock listings dataset for items matching the description,
     optional size, and optional price ceiling.
-
-    Args:
-        description: Keywords describing what the user is looking for
-                     (e.g., "vintage graphic tee").
-        size:        Size string to filter by, or None to skip size filtering.
-                     Matching is case-insensitive (e.g., "M" matches "S/M").
-        max_price:   Maximum price (inclusive), or None to skip price filtering.
-
-    Returns:
-        A list of matching listing dicts, sorted by relevance (best match first).
-        Returns an empty list if nothing matches — does NOT raise an exception.
-
-    Each listing dict has the following fields:
-        id, title, description, category, style_tags (list), size,
-        condition, price (float), colors (list), brand, platform
-
-    TODO:
-        1. Load all listings with load_listings().
-        2. Filter by max_price and size (if provided).
-        3. Score each remaining listing by keyword overlap with `description`.
-        4. Drop any listings with a score of 0 (no relevant matches).
-        5. Sort by score, highest first, and return the listing dicts.
-
-    Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    # 1. Load all listings
+    listings = load_listings()
+    
+    # Clean and tokenize query description
+    query_tokens = set(re.findall(r'\b\w+\b', description.lower())) if description else set()
+    
+    scored_listings = []
+
+    for item in listings:
+        # 2. Filter by max_price (inclusive)
+        if max_price is not None and float(item.get("price", 0)) > float(max_price):
+            continue
+
+        # Filter by size (case-insensitive substring match, e.g., "M" in "S/M")
+        if size:
+            item_size = (item.get("size") or "").upper()
+            target_size = size.upper()
+            if target_size not in item_size:
+                continue
+
+        # Safely extract string fields
+        title = (item.get("title") or "").lower()
+        desc = (item.get("description") or "").lower()
+        category = (item.get("category") or "").lower()
+        tags = [t.lower() for t in (item.get("style_tags") or []) if t]
+        brand = (item.get("brand") or "").lower()
+
+        # Tokenize fields
+        title_tokens = set(re.findall(r'\b\w+\b', title))
+        desc_tokens = set(re.findall(r'\b\w+\b', desc))
+        category_tokens = set(re.findall(r'\b\w+\b', category))
+        tag_tokens = set(re.findall(r'\b\w+\b', " ".join(tags)))
+        brand_tokens = set(re.findall(r'\b\w+\b', brand))
+
+        score = 0
+        for token in query_tokens:
+            if token in title_tokens:
+                score += 3
+            if token in category_tokens:
+                score += 3
+            if token in tag_tokens:
+                score += 2
+            if token in brand_tokens:
+                score += 2
+            if token in desc_tokens:
+                score += 1
+
+        if score > 0:
+            scored_listings.append((score, item))
+
+    scored_listings.sort(key=lambda x: x[0], reverse=True)
+    return [item for _, item in scored_listings]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
 
 def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
     """
-    Given a thrifted item and the user's wardrobe, suggest 1–2 complete outfits.
-
-    Args:
-        new_item: A listing dict (the item the user is considering buying).
-        wardrobe: A wardrobe dict with an 'items' key containing a list of
-                  wardrobe item dicts. May be empty — handle this gracefully.
-
-    Returns:
-        A non-empty string with outfit suggestions.
-        If the wardrobe is empty, offer general styling advice for the item
-        rather than raising an exception or returning an empty string.
-
-    TODO:
-        1. Check whether wardrobe['items'] is empty.
-        2. If empty: call the LLM with a prompt for general styling ideas
-           (what kinds of items pair well, what vibe it suits, etc.).
-        3. If not empty: format the wardrobe items into a prompt and ask
-           the LLM to suggest specific outfit combinations using the new item
-           and named pieces from the wardrobe.
-        4. Return the LLM's response as a string.
-
-    Before writing code, fill in the Tool 2 section of planning.md.
+    Given a thrifted item and the user's wardrobe, suggest complete outfits.
+    Handles empty wardrobe gracefully by providing general styling advice.
     """
-    # Replace this with your implementation
-    return ""
+    if not new_item or not isinstance(new_item, dict):
+        return "Error: Valid thrift item required."
+
+    items_list = wardrobe.get("items", []) if isinstance(wardrobe, dict) else []
+
+    title = new_item.get("title", "Thrift Item")
+    category = new_item.get("category", "Apparel")
+    style_tags = ", ".join(new_item.get("style_tags", []))
+
+    if not items_list:
+        prompt = (
+            f"The user has acquired a thrift item: {title} ({category}, style tags: {style_tags}). "
+            f"The user's wardrobe is empty. Suggest 2-3 versatile ways to style this piece "
+            f"as a standalone statement item using general fashion guidelines."
+        )
+    else:
+        wardrobe_str = json.dumps(items_list, indent=2)
+        prompt = (
+            f"New thrift item: {title} ({category}, style tags: {style_tags}).\n"
+            f"User's current wardrobe:\n{wardrobe_str}\n\n"
+            f"Suggest a cohesive, stylish outfit ensemble combining the new item with 2-3 items from the wardrobe."
+        )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": "You are an expert personal fashion stylist."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=350,
+        )
+        content = response.choices[0].message.content
+        return content.strip() if content else "Styling recommendation generation was empty."
+    except Exception as e:
+        return f"Styling unavailable: {str(e)}"
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
 
 def create_fit_card(outfit: str, new_item: dict) -> str:
     """
-    Generate a short, shareable outfit caption for the thrifted find.
-
-    Args:
-        outfit:   The outfit suggestion string from suggest_outfit().
-        new_item: The listing dict for the thrifted item.
-
-    Returns:
-        A 2–4 sentence string usable as an Instagram/TikTok caption.
-        If outfit is empty or missing, return a descriptive error message
-        string — do NOT raise an exception.
-
-    The caption should:
-    - Feel casual and authentic (like a real OOTD post, not a product description)
-    - Mention the item name, price, and platform naturally (once each)
-    - Capture the outfit vibe in specific terms
-    - Sound different each time for different inputs (use higher LLM temperature)
-
-    TODO:
-        1. Guard against an empty or whitespace-only outfit string.
-        2. Build a prompt that gives the LLM the item details and the outfit,
-           and asks for a caption matching the style guidelines above.
-        3. Call the LLM and return the response.
-
-    Before writing code, fill in the Tool 3 section of planning.md.
+    Generate a short, shareable outfit caption for the thrifted find using Groq LLM.
+    Guards against empty outfit strings or missing item context.
     """
-    # Replace this with your implementation
-    return ""
+    if not outfit or not outfit.strip():
+        return f"Error: Outfit details missing. Check out this find: {new_item.get('title', 'Thrift Item')} for ${new_item.get('price', 0.0)}!"
+
+    if not new_item or not isinstance(new_item, dict):
+        return "Error: Valid item details dictionary required."
+
+    title = new_item.get("title") or "Thrifted Find"
+    price = new_item.get("price", 0.0)
+    platform = new_item.get("platform") or "Thrift Find"
+
+    try:
+        price_str = f"${float(price):.2f}"
+    except (ValueError, TypeError):
+        price_str = str(price)
+
+    prompt = (
+        f"Write a short, casual, authentic 2-4 sentence Instagram/TikTok OOTD caption.\n\n"
+        f"Outfit Context: {outfit}\n"
+        f"Thrifted Item: {title}\n"
+        f"Price Paid: {price_str}\n"
+        f"Platform Sourced From: {platform}\n\n"
+        f"Style Requirements:\n"
+        f"- Sound authentic and casual (like a real OOTD post).\n"
+        f"- Naturally mention the item title ({title}), price ({price_str}), and platform ({platform}) exactly once each.\n"
+        f"- Keep it strictly between 2 to 4 sentences."
+    )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": "You are a trendy social media fashion influencer."},
+                {"role": "user", "content": prompt}],
+            temperature=0.8,
+            max_tokens=350,
+        )
+        message = response.choices[0].message
+        content = getattr(message, "content", None) or getattr(message, "reasoning_content", None)
+        if content and content.strip():
+            return content.strip()
+        return f"**Item:** {title}\n**Price:** {price_str}\nJust scored this awesome find!"
+    except Exception as e:
+        return f"**Item:** {title}\n**Price:** {price_str}\nJust scored this awesome find! (API Error: {str(e)})"

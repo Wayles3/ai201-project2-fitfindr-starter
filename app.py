@@ -32,19 +32,50 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
         A tuple of three strings:
             (listing_text, outfit_suggestion, fit_card)
         Each string maps to one of the three output panels in the UI.
-
-    TODO:
-        1. Guard against an empty query (return early with an error message).
-        2. Select the wardrobe based on wardrobe_choice.
-        3. Call run_agent() with the query and selected wardrobe.
-        4. If session["error"] is set, return the error in the first panel
-           and empty strings for the other two.
-        5. Otherwise, format session["selected_item"] into a readable listing_text
-           string and return it along with session["outfit_suggestion"] and
-           session["fit_card"].
     """
-    # TODO: implement this function
-    return "Agent not yet implemented.", "", ""
+    # 1. Guard against empty or whitespace-only query
+    if not user_query or not user_query.strip():
+        return "Please enter a search query (e.g., 'vintage graphic tee under $30').", "", ""
+
+    # 2. Select the wardrobe based on wardrobe_choice
+    if wardrobe_choice == "Example wardrobe":
+        wardrobe = get_example_wardrobe()
+    else:
+        wardrobe = get_empty_wardrobe()
+
+    # 3. Call run_agent() with the query and selected wardrobe
+    session = run_agent(query=user_query, wardrobe=wardrobe)
+
+    # 4. If session["error"] is set, return the error in the first panel and empty strings for others
+    if session.get("error"):
+        return f"⚠️ {session['error']}", "", ""
+
+    # 5. Format session["selected_item"] into a readable listing_text string
+    item = session.get("selected_item") or {}
+    title = item.get("title", "Unknown Title")
+    price = item.get("price", 0.0)
+    size = item.get("size", "N/A")
+    category = item.get("category", "N/A")
+    brand = item.get("brand", "N/A")
+    platform = item.get("platform", "N/A")
+    description = item.get("description", "")
+    style_tags = ", ".join(item.get("style_tags", []))
+
+    listing_text = (
+        f"Title: {title}\n"
+        f"Price: ${price:.2f}\n"
+        f"Size: {size}\n"
+        f"Category: {category}\n"
+        f"Brand: {brand}\n"
+        f"Platform: {platform}\n"
+        f"Tags: {style_tags}\n"
+        f"Description: {description}"
+    )
+
+    outfit_suggestion = session.get("outfit_suggestion") or ""
+    fit_card = session.get("fit_card") or ""
+
+    return listing_text, outfit_suggestion, fit_card
 
 
 # ── interface ─────────────────────────────────────────────────────────────────
