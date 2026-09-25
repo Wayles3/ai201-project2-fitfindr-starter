@@ -136,11 +136,7 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     size = parsed_params.get("size")
 
     try:
-        # Pass parameters positionally or use query_str to avoid signature mismatches
-        results = search_listings(desc, max_price=max_price, size=size)
-    except TypeError:
-        # Fallback if signature uses query_str explicitly
-        results = search_listings(query_str=desc, max_price=max_price, size=size)
+        results = search_listings(description=desc, size=size, max_price=max_price)
     except Exception as e:
         session["error"] = f"Error during search_listings execution: {str(e)}"
         return session
@@ -156,36 +152,11 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     selected_item = results[0]
     session["selected_item"] = selected_item
 
+    # Step 5: Execute tool suggest_outfit
    # Step 5: Execute tool suggest_outfit
     try:
-        item_title = selected_item.get("title") or "Thrifted Find"
-        outfit_res = suggest_outfit(item_title, wardrobe)
-
-        if isinstance(outfit_res, dict):
-            # Extract formatted outfit text or build a clean summary string
-            if "outfit" in outfit_res and isinstance(outfit_res["outfit"], str):
-                outfit_text = outfit_res["outfit"]
-            elif "items" in outfit_res and isinstance(outfit_res["items"], list):
-                names = [
-                    item.get("title") or item.get("name")
-                    for item in outfit_res["items"]
-                    if isinstance(item, dict)
-                ]
-                # Filter out None/empty strings and duplicate occurrences of item_title
-                filtered_names = [
-                    n for n in names 
-                    if n and n.strip().lower() != item_title.strip().lower()
-                ]
-                
-                if filtered_names:
-                    outfit_text = f"Pairing {item_title} with " + ", ".join(filtered_names)
-                else:
-                    outfit_text = f"Styled with {item_title}"
-            else:
-                outfit_text = str(outfit_res)
-        else:
-            outfit_text = str(outfit_res) if outfit_res else ""
-
+        # Pass selected_item (dict), NOT a string like selected_item.get("title")
+        outfit_text = suggest_outfit(new_item=selected_item, wardrobe=wardrobe)
         session["outfit_suggestion"] = outfit_text
     except Exception as e:
         session["error"] = f"Error during suggest_outfit execution: {str(e)}"
